@@ -199,3 +199,112 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
         return parsed_listings
 
     except Exception as e:
+        st.error(f"Error fetching data from API: {e}")
+        return[]
+
+# --- MAP RENDERING ---
+m = folium.Map(location=[st.session_state.clicked_lat, st.session_state.clicked_lng], zoom_start=15)
+
+folium.Marker([st.session_state.clicked_lat, st.session_state.clicked_lng],
+    icon=folium.Icon(color="red", icon="crosshairs", prefix='fa'),
+    tooltip="Search Center"
+).add_to(m)
+
+folium.Circle(
+    radius=radius_miles * 1609.34, 
+    location=[st.session_state.clicked_lat, st.session_state.clicked_lng],
+    color="blue",
+    fill=True,
+    fill_opacity=0.1
+).add_to(m)
+
+for listing in st.session_state.listings:
+    popup_text = f"<b>{listing['address']}</b><br/>${listing['price']:,.0f}<br/>{listing['beds']}B / {listing['baths']}b<br/><i>{listing['property_type']}</i>"
+    
+    if listing['status'] == "Closed" and listing['close_date'] != "N/A":
+        popup_text += f"<br/>Closed: {listing['close_date']}"
+    elif listing['list_date'] != "N/A":
+        popup_text += f"<br/>Listed: {listing['list_date']}"
+        
+    folium.Marker(
+        [listing["lat"], listing["lng"]],
+        icon=folium.Icon(color="green", icon="home"),
+        tooltip=listing["status"],
+        popup=folium.Popup(popup_text, max_width=250)
+    ).add_to(m)
+
+map_data = st_folium(m, width=800, height=500, returned_objects=["last_clicked"])
+
+# --- HANDLE MAP CLICKS ---
+if map_data and map_data.get("last_clicked"):
+    new_lat = map_data["last_clicked"]["lat"]
+    new_lng = map_data["last_clicked"]["lng"]
+    
+    if new_lat != st.session_state.clicked_lat or new_lng != st.session_state.clicked_lng:
+        st.session_state.clicked_lat = new_lat
+        st.session_state.clicked_lng = new_lng
+        st.session_state.listings =[] 
+        st.rerun()
+
+# --- SEARCH ACTION ---
+st.write(f"**Current SF Search Center:** {st.session_state.clicked_lat:.5f}, {st.session_state.clicked_lng:.5f}")
+
+if st.button("Search Actual API", type="primary"):
+    if not api_key:
+        st.error("Cannot search. The API Key is missing from Streamlit Secrets.")
+    else:
+        with st.spinner(f"Fetching {listing_status} listings from {market_id.upper()} (Max {max_results})..."):
+            st.session_state.listings = fetch_slipstream_listings(
+                st.session_state.clicked_lat,
+                st.session_state.clicked_lng,
+                radius_miles,
+                api_key,
+                market_id,
+                listing_status,
+                apply_date_filter,
+                filter_date,
+                property_type,      
+                agent_name_filter,
+                max_results         
+            )
+            
+        if st.session_state.listings:
+            st.success(f"Successfully mapped {len(st.session_state.listings)} properties matching your filters!")
+            st.rerun() 
+        else:
+            st.warning("No listings found matching your exact filters. Check the Debug Expander below.")
+
+# --- RESULTS DATAFRAME ---
+if st.session_state.listings:
+    st.write("### Listing Details (Click column headers to sort)")
+    df = pd.DataFrame(st.session_state.listings)
+    
+    # Force columns to numeric safely so the frontend React table doesn't crash on mixed types
+    df["price"] = pd.to_numeric(df["price"], errors="coerce").fillna(0)
+    df["beds"] = pd.to_numeric(df["beds"], errors="coerce").fillna(0)
+    df["baths"] = pd.to_numeric(df["baths"], errors="coerce").fillna(0)
+    
+    df = df[["address", "price", "status", "property_type", "beds", "baths", "agent", "list_date", "close_date"]]
+    
+    st.dataframe(
+        df, 
+        use_container_width=True, 
+        hide_index=True,
+        column_config={
+            "address": "Address",
+            "price": st.column_config.NumberColumn("Price", format="$%.0f"), # FIX: Changed to %.0f
+            "status": "Status",
+            "property_type": "Type",
+            "beds": st.column_config.NumberColumn("Beds"),
+            "baths": st.column_config.NumberColumn("Baths"),
+            "agent": "Agent Name",
+            "list_date": "List Date",
+            "close_date": "Close Date"
+        }
+    )
+
+with st.expander("🛠️ View Raw API Response (Debug)"):
+    if st.session_state.raw_api_response:
+        st.json(st.session_state.raw_api_response)
+    else:
+        st.write("No API calls made yet.")
