@@ -3,6 +3,7 @@ import folium
 from streamlit_folium import st_folium
 import requests
 import pandas as pd
+import math
 from datetime import datetime, timedelta
 
 # --- INITIALIZE SESSION STATE ---
@@ -87,6 +88,15 @@ filter_date = st.sidebar.date_input(
     help="Filters Listing Date (if Active) or Closed Date (if Closed)."
 )
 
+def haversine_distance(lat1, lon1, lat2, lon2):
+    """Calculates the distance in miles between two GPS coordinates."""
+    R = 3958.8 # Earth radius in miles
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+    return R * c
+
 def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date, since_date, prop_type_filter, agent_filter, limit_size):
     url = "https://slipstream.homejunction.com/ws/listings/search"
     
@@ -96,13 +106,18 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
         "HJI-API-Key": key 
     }
     
+    # UPDATED: Sending radius as a number, and using standard pagination parameters (NOT 'size'!)
     params = {
         "market": market,
         "lat": lat,
         "lon": lng,
-        "radius": f"{radius}mi", 
+        "latitude": lat,
+        "longitude": lng,
+        "radius": radius, 
+        "distance": radius,
         "status": status,
-        "size": limit_size
+        "limit": limit_size,
+        "pageSize": limit_size
     }
     
     try:
@@ -179,6 +194,14 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
                 item_lng = coords.get("longitude", coords.get("lon", item.get("lon", item.get("lng"))))
                 
                 if item_lat and item_lng:
+                    item_lat_f = float(item_lat)
+                    item_lng_f = float(item_lng)
+                    
+                    # 7. BULLETPROOF RADIUS CHECK (Double checking the API with Python!)
+                    dist_miles = haversine_distance(lat, lng, item_lat_f, item_lng_f)
+                    if dist_miles > radius:
+                        continue # Drop the property if it is secretly outside the circle
+                    
                     parsed_listings.append({
                         "address": address,
                         "price": price,
@@ -186,8 +209,8 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
                         "baths": baths,
                         "property_type": item_prop_type,
                         "agent": agent_full_name,
-                        "lat": float(item_lat),
-                        "lng": float(item_lng),
+                        "lat": item_lat_f,
+                        "lng": item_lng_f,
                         "status": str(item.get("status", status)),
                         "list_date": list_date_str[:10] if list_date_str else "N/A",
                         "close_date": close_date_str[:10] if close_date_str else "N/A"
@@ -279,7 +302,6 @@ if st.session_state.listings:
     st.write("### Listing Details (Click column headers to sort)")
     df = pd.DataFrame(st.session_state.listings)
     
-    # Force columns to numeric safely so the frontend React table doesn't crash on mixed types
     df["price"] = pd.to_numeric(df["price"], errors="coerce").fillna(0)
     df["beds"] = pd.to_numeric(df["beds"], errors="coerce").fillna(0)
     df["baths"] = pd.to_numeric(df["baths"], errors="coerce").fillna(0)
@@ -292,7 +314,7 @@ if st.session_state.listings:
         hide_index=True,
         column_config={
             "address": "Address",
-            "price": st.column_config.NumberColumn("Price", format="$%.0f"), # FIX: Changed to %.0f
+            "price": st.column_config.NumberColumn("Price", format="$%.0f"),
             "status": "Status",
             "property_type": "Type",
             "beds": st.column_config.NumberColumn("Beds"),
