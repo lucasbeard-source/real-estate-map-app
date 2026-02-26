@@ -62,14 +62,21 @@ max_results = st.sidebar.number_input(
     help="Limits the data payload to protect your API usage quota."
 )
 
-# --- PROPERTY & AGENT FILTERS ---
+# --- LISTING & PROPERTY FILTERS ---
 st.sidebar.markdown("---")
 st.sidebar.subheader("Additional Filters")
 
-property_type = st.sidebar.selectbox(
-    "Property Type",["All", "Residential", "Commercial", "Farm", "Land", "Multifamily", "Rental"],
+# NEW: Split Listing Type and Property Type
+listing_type_filter = st.sidebar.selectbox(
+    "Listing Type",["All", "Residential", "Commercial", "Farm", "Land", "Multifamily", "Rental"],
     index=1, 
-    help="Filters the API results. If results disappear, switch this back to 'All' to verify."
+    help="Broad category. Defaults to Residential."
+)
+
+property_type_filter = st.sidebar.text_input(
+    "Property Type", 
+    value="", 
+    help="Specific structure type (e.g., Single Family, Condo). Leave blank for all."
 )
 
 agent_name_filter = st.sidebar.text_input(
@@ -97,7 +104,7 @@ def haversine_distance(lat1, lon1, lat2, lon2):
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
     return R * c
 
-def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date, since_date, prop_type_filter, agent_filter, limit_size):
+def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date, since_date, listing_type, prop_type, agent_filter, limit_size):
     url = "https://slipstream.homejunction.com/ws/listings/search"
     
     headers = {
@@ -119,9 +126,11 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
         "pageSize": limit_size
     }
     
-    # UPDATED: We now tell the API to specifically filter the listingType for us!
-    if prop_type_filter != "All":
-        params["listingType"] = prop_type_filter
+    # Let the API filter these upfront if requested
+    if listing_type != "All":
+        params["listingType"] = listing_type
+    if prop_type:
+        params["propertyType"] = prop_type
     
     try:
         response = requests.get(url, headers=headers, params=params)
@@ -140,12 +149,16 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
         
         for item in raw_listings:
             try:
-                # 1. BULLETPROOF PROPERTY TYPE (Looking for 'listingType' based on screenshot)
-                item_prop_type = str(item.get("listingType") or item.get("propertyType") or "Unknown")
-                
-                # Double check Python filter just in case the API ignores our parameter above
-                if prop_type_filter != "All":
-                    if prop_type_filter.lower() not in item_prop_type.lower():
+                # 1A. BULLETPROOF LISTING TYPE
+                item_listing_type = str(item.get("listingType") or "Unknown")
+                if listing_type != "All":
+                    if listing_type.lower() not in item_listing_type.lower():
+                        continue
+                        
+                # 1B. BULLETPROOF PROPERTY TYPE
+                item_prop_type = str(item.get("propertyType") or "Unknown")
+                if prop_type:
+                    if prop_type.lower() not in item_prop_type.lower():
                         continue
                 
                 # 2. BULLETPROOF AGENT NAME
@@ -212,6 +225,7 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
                         "price": price,
                         "beds": beds,
                         "baths": baths,
+                        "listing_type": item_listing_type,
                         "property_type": item_prop_type,
                         "agent": agent_full_name,
                         "lat": item_lat_f,
@@ -247,7 +261,7 @@ folium.Circle(
 ).add_to(m)
 
 for listing in st.session_state.listings:
-    popup_text = f"<b>{listing['address']}</b><br/>${listing['price']:,.0f}<br/>{listing['beds']}B / {listing['baths']}b<br/><i>{listing['property_type']}</i>"
+    popup_text = f"<b>{listing['address']}</b><br/>${listing['price']:,.0f}<br/>{listing['beds']}B / {listing['baths']}b<br/><i>{listing['listing_type']} - {listing['property_type']}</i>"
     
     if listing['status'] == "Closed" and listing['close_date'] != "N/A":
         popup_text += f"<br/>Closed: {listing['close_date']}"
@@ -291,7 +305,8 @@ if st.button("Search Actual API", type="primary"):
                 listing_status,
                 apply_date_filter,
                 filter_date,
-                property_type,      
+                listing_type_filter,      
+                property_type_filter,      
                 agent_name_filter,
                 max_results         
             )
@@ -311,7 +326,7 @@ if st.session_state.listings:
     df["beds"] = pd.to_numeric(df["beds"], errors="coerce").fillna(0)
     df["baths"] = pd.to_numeric(df["baths"], errors="coerce").fillna(0)
     
-    df = df[["address", "price", "status", "property_type", "beds", "baths", "agent", "list_date", "close_date"]]
+    df = df[["address", "price", "status", "listing_type", "property_type", "beds", "baths", "agent", "list_date", "close_date"]]
     
     st.dataframe(
         df, 
@@ -321,7 +336,8 @@ if st.session_state.listings:
             "address": "Address",
             "price": st.column_config.NumberColumn("Price", format="$%.0f"),
             "status": "Status",
-            "property_type": "Type",
+            "listing_type": "Listing Type",
+            "property_type": "Property Sub-Type",
             "beds": st.column_config.NumberColumn("Beds"),
             "baths": st.column_config.NumberColumn("Baths"),
             "agent": "Agent Name",
