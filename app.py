@@ -66,7 +66,6 @@ max_results = st.sidebar.number_input(
 st.sidebar.markdown("---")
 st.sidebar.subheader("Additional Filters")
 
-# NEW: Split Listing Type and Property Type
 listing_type_filter = st.sidebar.selectbox(
     "Listing Type",["All", "Residential", "Commercial", "Farm", "Land", "Multifamily", "Rental"],
     index=1, 
@@ -95,6 +94,7 @@ filter_date = st.sidebar.date_input(
     help="Filters Listing Date (if Active) or Closed Date (if Closed)."
 )
 
+# --- HELPER FUNCTIONS ---
 def haversine_distance(lat1, lon1, lat2, lon2):
     """Calculates the distance in miles between two GPS coordinates."""
     R = 3958.8 
@@ -103,6 +103,18 @@ def haversine_distance(lat1, lon1, lat2, lon2):
     a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
     return R * c
+
+def extract_api_date(item, possible_keys):
+    """Aggressively hunts for a date inside the JSON payload."""
+    # 1. Check root level
+    for key in possible_keys:
+        if item.get(key): return str(item.get(key))
+    # 2. Check nested objects where HJ sometimes hides dates
+    for nested in["dates", "timestamps", "system"]:
+        if isinstance(item.get(nested), dict):
+            for key in possible_keys:
+                if item[nested].get(key): return str(item[nested].get(key))
+    return ""
 
 def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date, since_date, listing_type, prop_type, agent_filter, limit_size):
     url = "https://slipstream.homejunction.com/ws/listings/search"
@@ -126,7 +138,6 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
         "pageSize": limit_size
     }
     
-    # Let the API filter these upfront if requested
     if listing_type != "All":
         params["listingType"] = listing_type
     if prop_type:
@@ -149,28 +160,28 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
         
         for item in raw_listings:
             try:
-                # 1A. BULLETPROOF LISTING TYPE
+                # 1. BULLETPROOF LISTING TYPE
                 item_listing_type = str(item.get("listingType") or "Unknown")
                 if listing_type != "All":
                     if listing_type.lower() not in item_listing_type.lower():
                         continue
                         
-                # 1B. BULLETPROOF PROPERTY TYPE
+                # 2. BULLETPROOF PROPERTY TYPE
                 item_prop_type = str(item.get("propertyType") or "Unknown")
                 if prop_type:
                     if prop_type.lower() not in item_prop_type.lower():
                         continue
                 
-                # 2. BULLETPROOF AGENT NAME
+                # 3. BULLETPROOF AGENT NAME
                 agent_info = item.get("listAgent") or {}
                 agent_full_name = str(agent_info.get("fullName") or agent_info.get("name") or item.get("agentName") or "Unknown Agent")
                 if agent_filter:
                     if agent_filter.lower() not in agent_full_name.lower():
                         continue 
 
-                # 3. BULLETPROOF DATE FILTERING
-                list_date_str = str(item.get("listDate") or item.get("listingDate") or "")
-                close_date_str = str(item.get("closeDate") or item.get("closedDate") or "")
+                # 4. BULLETPROOF DATE FILTERING (Using our new aggressive date hunter)
+                list_date_str = extract_api_date(item, ["listDate", "listingDate", "onMarketDate", "entryDate"])
+                close_date_str = extract_api_date(item,["closeDate", "closedDate", "soldDate", "offMarketDate"])
                 
                 if apply_date:
                     target_date_str = close_date_str if status == "Closed" else list_date_str
@@ -182,7 +193,7 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
                         except Exception:
                             pass 
                 
-                # 4. BULLETPROOF ADDRESS
+                # 5. BULLETPROOF ADDRESS
                 addr_info = item.get("address") or {}
                 if isinstance(addr_info, dict):
                     if addr_info.get("withheld", False) or "deliveryLine" not in addr_info:
@@ -194,7 +205,7 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
                 else:
                     address = str(addr_info)
 
-                # 5. BULLETPROOF PRICING
+                # 6. BULLETPROOF PRICING
                 raw_price = item.get("listPrice")
                 if raw_price is None:
                     raw_price = item.get("price", 0)
@@ -206,7 +217,7 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
                 beds = item.get("beds", item.get("bedrooms", 0))
                 baths = item.get("baths", item.get("bathrooms", 0))
                 
-                # 6. BULLETPROOF COORDINATES
+                # 7. BULLETPROOF COORDINATES
                 coords = item.get("coordinates") or {}
                 item_lat = coords.get("latitude", coords.get("lat", item.get("lat")))
                 item_lng = coords.get("longitude", coords.get("lon", item.get("lon", item.get("lng"))))
@@ -215,7 +226,6 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
                     item_lat_f = float(item_lat)
                     item_lng_f = float(item_lng)
                     
-                    # 7. BULLETPROOF RADIUS CHECK
                     dist_miles = haversine_distance(lat, lng, item_lat_f, item_lng_f)
                     if dist_miles > radius:
                         continue 
@@ -322,9 +332,10 @@ if st.session_state.listings:
     st.write("### Listing Details (Click column headers to sort)")
     df = pd.DataFrame(st.session_state.listings)
     
-    df["price"] = pd.to_numeric(df["price"], errors="coerce").fillna(0)
-    df["beds"] = pd.to_numeric(df["beds"], errors="coerce").fillna(0)
-    df["baths"] = pd.to_numeric(df["baths"], errors="coerce").fillna(0)
+    # FIX: Force strict integers for React frontend to prevent Error #185!
+    df["price"] = pd.to_numeric(df["price"], errors="coerce").fillna(0).astype(int)
+    df["beds"] = pd.to_numeric(df["beds"], errors="coerce").fillna(0).astype(float)
+    df["baths"] = pd.to_numeric(df["baths"], errors="coerce").fillna(0).astype(float)
     
     df = df[["address", "price", "status", "listing_type", "property_type", "beds", "baths", "agent", "list_date", "close_date"]]
     
@@ -334,7 +345,7 @@ if st.session_state.listings:
         hide_index=True,
         column_config={
             "address": "Address",
-            "price": st.column_config.NumberColumn("Price", format="$%.0f"),
+            "price": st.column_config.NumberColumn("Price", format="$%d"), # Now safely processes as a strict integer
             "status": "Status",
             "listing_type": "Listing Type",
             "property_type": "Property Sub-Type",
