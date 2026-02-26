@@ -66,7 +66,6 @@ max_results = st.sidebar.number_input(
 st.sidebar.markdown("---")
 st.sidebar.subheader("Additional Filters")
 
-# UPDATED: Set standard RESO options and default to index 1 ("Residential")
 property_type = st.sidebar.selectbox(
     "Property Type",["All", "Residential", "Commercial", "Farm", "Land", "Multifamily", "Rental"],
     index=1, 
@@ -91,7 +90,7 @@ filter_date = st.sidebar.date_input(
 
 def haversine_distance(lat1, lon1, lat2, lon2):
     """Calculates the distance in miles between two GPS coordinates."""
-    R = 3958.8 # Earth radius in miles
+    R = 3958.8 
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
     a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
@@ -120,6 +119,10 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
         "pageSize": limit_size
     }
     
+    # UPDATED: We now tell the API to specifically filter the listingType for us!
+    if prop_type_filter != "All":
+        params["listingType"] = prop_type_filter
+    
     try:
         response = requests.get(url, headers=headers, params=params)
         response.raise_for_status() 
@@ -127,7 +130,7 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
         
         st.session_state.raw_api_response = data 
         
-        raw_listings = []
+        raw_listings =[]
         if "result" in data and isinstance(data["result"], dict) and "listings" in data["result"]:
             raw_listings = data["result"]["listings"]
         elif "result" in data and isinstance(data["result"], list):
@@ -137,8 +140,10 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
         
         for item in raw_listings:
             try:
-                # 1. BULLETPROOF PROPERTY TYPE
-                item_prop_type = str(item.get("propertyType") or "Unknown")
+                # 1. BULLETPROOF PROPERTY TYPE (Looking for 'listingType' based on screenshot)
+                item_prop_type = str(item.get("listingType") or item.get("propertyType") or "Unknown")
+                
+                # Double check Python filter just in case the API ignores our parameter above
                 if prop_type_filter != "All":
                     if prop_type_filter.lower() not in item_prop_type.lower():
                         continue
