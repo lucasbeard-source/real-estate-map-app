@@ -67,15 +67,19 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("Additional Filters")
 
 listing_type_filter = st.sidebar.selectbox(
-    "Listing Type",["All", "Residential", "Commercial", "Farm", "Land", "Multifamily", "Rental"],
+    "Listing Type (Broad)",["All", "Residential", "Commercial", "Farm", "Land", "Multifamily", "Rental"],
     index=1, 
     help="Broad category. Defaults to Residential."
 )
 
-property_type_filter = st.sidebar.text_input(
-    "Property Type", 
-    value="", 
-    help="Specific structure type (e.g., Single Family, Condo). Leave blank for all."
+# UPDATED: Changed from text_input to a standardized dropdown!
+property_type_filter = st.sidebar.selectbox(
+    "Property Type (Specific)",[
+        "All", "Single Family", "Condominium", "Townhouse", "Duplex", 
+        "Triplex", "Quadruplex", "Manufactured Home", "Mobile Home", "Land"
+    ],
+    index=0,
+    help="Specific structure type."
 )
 
 agent_name_filter = st.sidebar.text_input(
@@ -106,11 +110,9 @@ def haversine_distance(lat1, lon1, lat2, lon2):
 
 def extract_api_date(item, possible_keys):
     """Aggressively hunts for a date inside the JSON payload."""
-    # 1. Check root level
     for key in possible_keys:
         if item.get(key): return str(item.get(key))
-    # 2. Check nested objects where HJ sometimes hides dates
-    for nested in["dates", "timestamps", "system"]:
+    for nested in["dates", "timestamps", "system", "details", "extended"]:
         if isinstance(item.get(nested), dict):
             for key in possible_keys:
                 if item[nested].get(key): return str(item[nested].get(key))
@@ -135,12 +137,14 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
         "distance": radius,
         "status": status,
         "limit": limit_size,
-        "pageSize": limit_size
+        "pageSize": limit_size,
+        "details": "true",   # NEW: Force API to return deeply nested details
+        "extended": "true"   # NEW: Force API to return extended attributes 
     }
     
     if listing_type != "All":
         params["listingType"] = listing_type
-    if prop_type:
+    if prop_type != "All":
         params["propertyType"] = prop_type
     
     try:
@@ -168,7 +172,8 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
                         
                 # 2. BULLETPROOF PROPERTY TYPE
                 item_prop_type = str(item.get("propertyType") or "Unknown")
-                if prop_type:
+                if prop_type != "All":
+                    # Partial match handles "Single Family Residence" matching "Single Family"
                     if prop_type.lower() not in item_prop_type.lower():
                         continue
                 
@@ -179,9 +184,9 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
                     if agent_filter.lower() not in agent_full_name.lower():
                         continue 
 
-                # 4. BULLETPROOF DATE FILTERING (Using our new aggressive date hunter)
-                list_date_str = extract_api_date(item, ["listDate", "listingDate", "onMarketDate", "entryDate"])
-                close_date_str = extract_api_date(item,["closeDate", "closedDate", "soldDate", "offMarketDate"])
+                # 4. BULLETPROOF DATE FILTERING
+                list_date_str = extract_api_date(item,["listDate", "listingDate", "onMarketDate", "entryDate"])
+                close_date_str = extract_api_date(item, ["closeDate", "closedDate", "soldDate", "offMarketDate"])
                 
                 if apply_date:
                     target_date_str = close_date_str if status == "Closed" else list_date_str
@@ -332,7 +337,6 @@ if st.session_state.listings:
     st.write("### Listing Details (Click column headers to sort)")
     df = pd.DataFrame(st.session_state.listings)
     
-    # FIX: Force strict integers for React frontend to prevent Error #185!
     df["price"] = pd.to_numeric(df["price"], errors="coerce").fillna(0).astype(int)
     df["beds"] = pd.to_numeric(df["beds"], errors="coerce").fillna(0).astype(float)
     df["baths"] = pd.to_numeric(df["baths"], errors="coerce").fillna(0).astype(float)
@@ -345,7 +349,7 @@ if st.session_state.listings:
         hide_index=True,
         column_config={
             "address": "Address",
-            "price": st.column_config.NumberColumn("Price", format="$%d"), # Now safely processes as a strict integer
+            "price": st.column_config.NumberColumn("Price", format="$%d"),
             "status": "Status",
             "listing_type": "Listing Type",
             "property_type": "Property Sub-Type",
