@@ -72,7 +72,6 @@ listing_type_filter = st.sidebar.selectbox(
     help="Broad category. Defaults to Residential."
 )
 
-# UPDATED: Changed from text_input to a standardized dropdown!
 property_type_filter = st.sidebar.selectbox(
     "Property Type (Specific)",[
         "All", "Single Family", "Condominium", "Townhouse", "Duplex", 
@@ -127,25 +126,21 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
         "HJI-API-Key": key 
     }
     
+    # CRITICAL FIX: Re-added the "mi" text to the radius so the API actually understands the boundary!
     params = {
         "market": market,
         "lat": lat,
         "lon": lng,
-        "latitude": lat,
-        "longitude": lng,
-        "radius": radius, 
-        "distance": radius,
+        "radius": f"{radius}mi", 
         "status": status,
         "limit": limit_size,
-        "pageSize": limit_size,
-        "details": "true",   # NEW: Force API to return deeply nested details
-        "extended": "true"   # NEW: Force API to return extended attributes 
+        "details": "true",
+        "extended": "true" 
     }
     
+    # We pass ListingType to the API to save bandwidth, but leave PropertyType to the Python text-matcher
     if listing_type != "All":
         params["listingType"] = listing_type
-    if prop_type != "All":
-        params["propertyType"] = prop_type
     
     try:
         response = requests.get(url, headers=headers, params=params)
@@ -173,7 +168,7 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
                 # 2. BULLETPROOF PROPERTY TYPE
                 item_prop_type = str(item.get("propertyType") or "Unknown")
                 if prop_type != "All":
-                    # Partial match handles "Single Family Residence" matching "Single Family"
+                    # Smart partial match (e.g. "Single Family" safely matches "Single Family Residence")
                     if prop_type.lower() not in item_prop_type.lower():
                         continue
                 
@@ -186,7 +181,7 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
 
                 # 4. BULLETPROOF DATE FILTERING
                 list_date_str = extract_api_date(item,["listDate", "listingDate", "onMarketDate", "entryDate"])
-                close_date_str = extract_api_date(item, ["closeDate", "closedDate", "soldDate", "offMarketDate"])
+                close_date_str = extract_api_date(item,["closeDate", "closedDate", "soldDate", "offMarketDate"])
                 
                 if apply_date:
                     target_date_str = close_date_str if status == "Closed" else list_date_str
@@ -231,6 +226,7 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
                     item_lat_f = float(item_lat)
                     item_lng_f = float(item_lng)
                     
+                    # 8. THE SAVIOR FUNCTION: Checks the API's work to ensure we are actually inside the circle
                     dist_miles = haversine_distance(lat, lng, item_lat_f, item_lng_f)
                     if dist_miles > radius:
                         continue 
