@@ -107,8 +107,18 @@ def haversine_distance(lat1, lon1, lat2, lon2):
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
     return R * c
 
+def get_bounding_box(lat, lon, radius_miles):
+    """Calculates a bounding box (square) around the central pin to force the API to filter geographically."""
+    lat_change = radius_miles / 69.0
+    lon_change = radius_miles / (69.0 * math.cos(math.radians(lat)))
+    
+    n = lat + lat_change
+    s = lat - lat_change
+    e = lon + lon_change
+    w = lon - lon_change
+    return s, w, n, e
+
 def extract_api_date(item, possible_keys):
-    """Aggressively hunts for a date inside the JSON payload."""
     for key in possible_keys:
         if item.get(key): return str(item.get(key))
     for nested in["dates", "timestamps", "system", "details", "extended"]:
@@ -126,21 +136,36 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
         "HJI-API-Key": key 
     }
     
-    # CRITICAL FIX: Re-added the "mi" text to the radius so the API actually understands the boundary!
+    # Generate the geographic boundaries
+    s, w, n, e = get_bounding_box(lat, lng, radius)
+    polygon_str = f"{n},{w}|{n},{e}|{s},{e}|{s},{w}|{n},{w}"
+    
+    # CRITICAL FIX: We are throwing every common spatial parameter at the API to guarantee it filters locally!
     params = {
         "market": market,
-        "lat": lat,
-        "lon": lng,
-        "radius": f"{radius}mi", 
         "status": status,
         "limit": limit_size,
+        "pageSize": limit_size,
         "details": "true",
-        "extended": "true" 
+        "extended": "true",
+        "lat": lat,
+        "lon": lng,
+        "latitude": lat,
+        "longitude": lng,
+        "radius": f"{radius}mi", 
+        "distance": f"{radius}mi",
+        "bounds": f"{s},{w},{n},{e}",
+        "polygon": polygon_str,
+        "swLat": s,
+        "swLon": w,
+        "neLat": n,
+        "neLon": e
     }
     
-    # We pass ListingType to the API to save bandwidth, but leave PropertyType to the Python text-matcher
     if listing_type != "All":
         params["listingType"] = listing_type
+    if prop_type != "All":
+        params["propertyType"] = prop_type
     
     try:
         response = requests.get(url, headers=headers, params=params)
@@ -168,7 +193,6 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
                 # 2. BULLETPROOF PROPERTY TYPE
                 item_prop_type = str(item.get("propertyType") or "Unknown")
                 if prop_type != "All":
-                    # Smart partial match (e.g. "Single Family" safely matches "Single Family Residence")
                     if prop_type.lower() not in item_prop_type.lower():
                         continue
                 
@@ -226,7 +250,7 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
                     item_lat_f = float(item_lat)
                     item_lng_f = float(item_lng)
                     
-                    # 8. THE SAVIOR FUNCTION: Checks the API's work to ensure we are actually inside the circle
+                    # 8. THE SAVIOR FUNCTION: Double checks the API's math to ensure it is actually inside the circle
                     dist_miles = haversine_distance(lat, lng, item_lat_f, item_lng_f)
                     if dist_miles > radius:
                         continue 
@@ -249,11 +273,12 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
                 print(f"Skipped a row due to parsing error: {loop_error}")
                 continue
                 
-        return parsed_listings
+        # Return both the parsed listings AND the raw count for better UI warnings
+        return parsed_listings, len(raw_listings)
 
     except Exception as e:
         st.error(f"Error fetching data from API: {e}")
-        return[]
+        return[], 0
 
 # --- MAP RENDERING ---
 m = folium.Map(location=[st.session_state.clicked_lat, st.session_state.clicked_lng], zoom_start=15)
@@ -307,7 +332,7 @@ if st.button("Search Actual API", type="primary"):
         st.error("Cannot search. The API Key is missing from Streamlit Secrets.")
     else:
         with st.spinner(f"Fetching {listing_status} listings from {market_id.upper()} (Max {max_results})..."):
-            st.session_state.listings = fetch_slipstream_listings(
+            st.session_state.listings, raw_count = fetch_slipstream_listings(
                 st.session_state.clicked_lat,
                 st.session_state.clicked_lng,
                 radius_miles,
@@ -323,10 +348,13 @@ if st.button("Search Actual API", type="primary"):
             )
             
         if st.session_state.listings:
-            st.success(f"Successfully mapped {len(st.session_state.listings)} properties matching your filters!")
+            st.success(f"Successfully mapped {len(st.session_state.listings)} properties!")
             st.rerun() 
         else:
-            st.warning("No listings found matching your exact filters. Check the Debug Expander below.")
+            if raw_count > 0:
+                st.warning(f"The API returned {raw_count} properties, but NONE of them matched your geographic circle or specific filters. Try increasing your radius or limit!")
+            else:
+                st.warning("The API returned 0 results. Check the Debug Expander below.")
 
 # --- RESULTS DATAFRAME ---
 if st.session_state.listings:
