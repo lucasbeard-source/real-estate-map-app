@@ -66,10 +66,11 @@ max_results = st.sidebar.number_input(
 st.sidebar.markdown("---")
 st.sidebar.subheader("Additional Filters")
 
+# UPDATED: Set standard RESO options and default to index 1 ("Residential")
 property_type = st.sidebar.selectbox(
-    "Property Type",["All", "Residential", "Commercial", "Land", "Multi-Family", "Condo"],
-    index=0,
-    help="Note: Different MLS boards use different terms (e.g., SFR vs Residential). If your results disappear, switch this back to 'All'."
+    "Property Type",["All", "Residential", "Commercial", "Farm", "Land", "Multifamily", "Rental"],
+    index=1, 
+    help="Filters the API results. If results disappear, switch this back to 'All' to verify."
 )
 
 agent_name_filter = st.sidebar.text_input(
@@ -106,7 +107,6 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
         "HJI-API-Key": key 
     }
     
-    # UPDATED: Sending radius as a number, and using standard pagination parameters (NOT 'size'!)
     params = {
         "market": market,
         "lat": lat,
@@ -127,7 +127,7 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
         
         st.session_state.raw_api_response = data 
         
-        raw_listings =[]
+        raw_listings = []
         if "result" in data and isinstance(data["result"], dict) and "listings" in data["result"]:
             raw_listings = data["result"]["listings"]
         elif "result" in data and isinstance(data["result"], list):
@@ -197,10 +197,10 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
                     item_lat_f = float(item_lat)
                     item_lng_f = float(item_lng)
                     
-                    # 7. BULLETPROOF RADIUS CHECK (Double checking the API with Python!)
+                    # 7. BULLETPROOF RADIUS CHECK
                     dist_miles = haversine_distance(lat, lng, item_lat_f, item_lng_f)
                     if dist_miles > radius:
-                        continue # Drop the property if it is secretly outside the circle
+                        continue 
                     
                     parsed_listings.append({
                         "address": address,
