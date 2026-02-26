@@ -30,7 +30,6 @@ else:
 st.sidebar.header("Search Settings")
 market_id = st.sidebar.text_input("Market ID", value="sfar", help="Your MLS Market ID")
 
-# UPDATED: Slider now supports decimals, defaults to 0.1 miles, steps by 0.1
 radius_miles = st.sidebar.slider(
     "Search Radius (miles)", 
     min_value=0.1, 
@@ -39,7 +38,6 @@ radius_miles = st.sidebar.slider(
     step=0.1
 )
 
-# UPDATED: Complete RESO Standardized Status List
 listing_status = st.sidebar.selectbox(
     "Listing Status",[
         "Active", 
@@ -74,7 +72,7 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status):
         "market": market,
         "lat": lat,
         "lon": lng,
-        "radius": f"{radius}mi", # e.g. "0.1mi"
+        "radius": f"{radius}mi", 
         "status": status  
     }
     
@@ -85,7 +83,7 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status):
         
         st.session_state.raw_api_response = data 
         
-        raw_listings =[]
+        raw_listings = []
         if "result" in data and isinstance(data["result"], dict) and "listings" in data["result"]:
             raw_listings = data["result"]["listings"]
         elif "result" in data and isinstance(data["result"], list):
@@ -95,14 +93,29 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status):
         
         for item in raw_listings:
             try:
-                address = item.get("address", {}).get("deliveryLine", item.get("address", "Unknown Address"))
+                # 1. Safely parse the address (handling "withheld" privacy flags)
+                addr_info = item.get("address", {})
+                if isinstance(addr_info, dict):
+                    if addr_info.get("withheld", False) or "deliveryLine" not in addr_info:
+                        city = addr_info.get("city", "Unknown City")
+                        zip_code = addr_info.get("zip", "")
+                        address = f"Address Withheld ({city} {zip_code})".strip()
+                    else:
+                        address = addr_info.get("deliveryLine", "Unknown Address")
+                else:
+                    address = str(addr_info)
+
+                # 2. Safely parse Price, Beds, Baths
                 price = item.get("listPrice", item.get("price", 0))
                 beds = item.get("beds", item.get("bedrooms", 0))
                 baths = item.get("baths", item.get("bathrooms", 0))
                 
-                item_lat = item.get("coordinates", {}).get("lat", item.get("lat"))
-                item_lng = item.get("coordinates", {}).get("lon", item.get("lon", item.get("lng")))
+                # 3. FIX: Check for the exact words "latitude" and "longitude"
+                coords = item.get("coordinates", {})
+                item_lat = coords.get("latitude", coords.get("lat", item.get("lat")))
+                item_lng = coords.get("longitude", coords.get("lon", item.get("lon", item.get("lng"))))
                 
+                # If we successfully found coordinates, add it to our list!
                 if item_lat and item_lng:
                     parsed_listings.append({
                         "address": address,
@@ -113,7 +126,7 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status):
                         "lng": float(item_lng),
                         "status": item.get("status", status)
                     })
-            except Exception:
+            except Exception as e:
                 continue
                 
         return parsed_listings
@@ -123,7 +136,6 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status):
         return[]
 
 # --- MAP RENDERING ---
-# UPDATED: Increased zoom_start to 16 so the 0.1m radius circle is easily visible
 m = folium.Map(location=[st.session_state.clicked_lat, st.session_state.clicked_lng], zoom_start=16)
 
 folium.Marker([st.session_state.clicked_lat, st.session_state.clicked_lng],
@@ -132,7 +144,7 @@ folium.Marker([st.session_state.clicked_lat, st.session_state.clicked_lng],
 ).add_to(m)
 
 folium.Circle(
-    radius=radius_miles * 1609.34, # Converts decimal miles to meters correctly
+    radius=radius_miles * 1609.34, 
     location=[st.session_state.clicked_lat, st.session_state.clicked_lng],
     color="blue",
     fill=True,
