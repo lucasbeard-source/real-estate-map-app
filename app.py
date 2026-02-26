@@ -31,7 +31,6 @@ else:
 st.sidebar.header("Search Settings")
 market_id = st.sidebar.text_input("Market ID", value="sfar", help="Your MLS Market ID")
 
-# UPDATED: Changed from slider to number_input so you can type exact decimals
 radius_miles = st.sidebar.number_input(
     "Search Radius (miles)", 
     min_value=0.01, 
@@ -50,13 +49,26 @@ listing_status = st.sidebar.selectbox(
     index=0
 )
 
-# --- NEW: PROPERTY & AGENT FILTERS ---
+# --- NEW: API LIMITER ---
+st.sidebar.markdown("---")
+st.sidebar.subheader("API Limits")
+max_results = st.sidebar.number_input(
+    "Max Results per Request",
+    min_value=1,
+    max_value=500,
+    value=200,
+    step=25,
+    help="Limits the data payload to protect your API usage quota."
+)
+
+# --- PROPERTY & AGENT FILTERS ---
 st.sidebar.markdown("---")
 st.sidebar.subheader("Additional Filters")
 
 property_type = st.sidebar.selectbox(
-    "Property Type",["All", "Residential", "Commercial", "Land", "Multi-Family", "Residential Income"],
-    index=0
+    "Property Type",["All", "Residential", "Commercial", "Land", "Multi-Family", "Condo"],
+    index=0,
+    help="Note: Different MLS boards use different terms (e.g., SFR vs Residential). If your results disappear, switch this back to 'All'."
 )
 
 agent_name_filter = st.sidebar.text_input(
@@ -75,7 +87,7 @@ filter_date = st.sidebar.date_input(
     help="Filters Listing Date (if Active) or Closed Date (if Closed)."
 )
 
-def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date, since_date, prop_type_filter, agent_filter):
+def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date, since_date, prop_type_filter, agent_filter, limit_size):
     url = "https://slipstream.homejunction.com/ws/listings/search"
     
     headers = {
@@ -84,12 +96,14 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
         "HJI-API-Key": key 
     }
     
+    # UPDATED: Added the "size" parameter to restrict the API's payload
     params = {
         "market": market,
         "lat": lat,
         "lon": lng,
         "radius": f"{radius}mi", 
-        "status": status  
+        "status": status,
+        "size": limit_size
     }
     
     try:
@@ -109,26 +123,26 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
         
         for item in raw_listings:
             try:
-                # --- PROPERTY TYPE FILTER ---
-                item_prop_type = item.get("propertyType", "Unknown")
+                # 1. BULLETPROOF PROPERTY TYPE
+                item_prop_type = str(item.get("propertyType") or "Unknown")
                 if prop_type_filter != "All":
                     if prop_type_filter.lower() not in item_prop_type.lower():
-                        continue # Skip this property if it doesn't match the dropdown
+                        continue
                 
-                # --- AGENT NAME FILTER ---
-                agent_info = item.get("listAgent", {})
-                agent_full_name = agent_info.get("fullName", agent_info.get("name", item.get("agentName", "Unknown Agent")))
+                # 2. BULLETPROOF AGENT NAME
+                agent_info = item.get("listAgent") or {}
+                agent_full_name = str(agent_info.get("fullName") or agent_info.get("name") or item.get("agentName") or "Unknown Agent")
                 if agent_filter:
                     if agent_filter.lower() not in agent_full_name.lower():
-                        continue # Skip this property if the typed name isn't in the agent's full name
+                        continue 
 
-                # --- DATE FILTERING ---
-                list_date_str = item.get("listDate", item.get("listingDate"))
-                close_date_str = item.get("closeDate", item.get("closedDate"))
+                # 3. BULLETPROOF DATE FILTERING
+                list_date_str = str(item.get("listDate") or item.get("listingDate") or "")
+                close_date_str = str(item.get("closeDate") or item.get("closedDate") or "")
                 
                 if apply_date:
                     target_date_str = close_date_str if status == "Closed" else list_date_str
-                    if target_date_str:
+                    if target_date_str and len(target_date_str) >= 10:
                         try:
                             item_date = datetime.strptime(target_date_str[:10], "%Y-%m-%d").date()
                             if item_date < since_date:
@@ -136,8 +150,8 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
                         except Exception:
                             pass 
                 
-                # --- STANDARD PARSING ---
-                addr_info = item.get("address", {})
+                # 4. BULLETPROOF ADDRESS
+                addr_info = item.get("address") or {}
                 if isinstance(addr_info, dict):
                     if addr_info.get("withheld", False) or "deliveryLine" not in addr_info:
                         city = addr_info.get("city", "Unknown City")
@@ -148,29 +162,39 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
                 else:
                     address = str(addr_info)
 
-                price = item.get("listPrice", item.get("price", 0))
+                # 5. BULLETPROOF PRICING
+                raw_price = item.get("listPrice")
+                if raw_price is None:
+                    raw_price = item.get("price", 0)
+                try:
+                    price = float(raw_price) if raw_price else 0.0
+                except (ValueError, TypeError):
+                    price = 0.0
+
                 beds = item.get("beds", item.get("bedrooms", 0))
                 baths = item.get("baths", item.get("bathrooms", 0))
                 
-                coords = item.get("coordinates", {})
+                # 6. BULLETPROOF COORDINATES
+                coords = item.get("coordinates") or {}
                 item_lat = coords.get("latitude", coords.get("lat", item.get("lat")))
                 item_lng = coords.get("longitude", coords.get("lon", item.get("lon", item.get("lng"))))
                 
                 if item_lat and item_lng:
                     parsed_listings.append({
                         "address": address,
-                        "price": float(price) if price else 0.0, # Kept as float for proper sorting!
+                        "price": price,
                         "beds": beds,
                         "baths": baths,
                         "property_type": item_prop_type,
                         "agent": agent_full_name,
                         "lat": float(item_lat),
                         "lng": float(item_lng),
-                        "status": item.get("status", status),
+                        "status": str(item.get("status", status)),
                         "list_date": list_date_str[:10] if list_date_str else "N/A",
                         "close_date": close_date_str[:10] if close_date_str else "N/A"
                     })
-            except Exception as e:
+            except Exception as loop_error:
+                print(f"Skipped a row due to parsing error: {loop_error}")
                 continue
                 
         return parsed_listings
@@ -230,7 +254,7 @@ if st.button("Search Actual API", type="primary"):
     if not api_key:
         st.error("Cannot search. The API Key is missing from Streamlit Secrets.")
     else:
-        with st.spinner(f"Fetching {listing_status} listings from {market_id.upper()}..."):
+        with st.spinner(f"Fetching {listing_status} listings from {market_id.upper()} (Max {max_results})..."):
             st.session_state.listings = fetch_slipstream_listings(
                 st.session_state.clicked_lat,
                 st.session_state.clicked_lng,
@@ -240,12 +264,13 @@ if st.button("Search Actual API", type="primary"):
                 listing_status,
                 apply_date_filter,
                 filter_date,
-                property_type,       # Pass new property type
-                agent_name_filter    # Pass new agent name
+                property_type,      
+                agent_name_filter,
+                max_results          # Pass the new limit into the API call
             )
             
         if st.session_state.listings:
-            st.success(f"Found {len(st.session_state.listings)} properties matching your filters!")
+            st.success(f"Successfully mapped {len(st.session_state.listings)} properties matching your filters!")
             st.rerun() 
         else:
             st.warning("No listings found matching your exact filters. Check the Debug Expander below.")
@@ -255,10 +280,8 @@ if st.session_state.listings:
     st.write("### Listing Details (Click column headers to sort)")
     df = pd.DataFrame(st.session_state.listings)
     
-    # Reorder columns to look professional
     df = df[["address", "price", "status", "property_type", "beds", "baths", "agent", "list_date", "close_date"]]
     
-    # UPDATED: Use Column Config so price sorts correctly as a number, but displays as currency
     st.dataframe(
         df, 
         use_container_width=True, 
