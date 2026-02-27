@@ -109,9 +109,7 @@ def haversine_distance(lat1, lon1, lat2, lon2):
 
 def get_bounding_box(lat, lon, radius_miles):
     """Calculates a bounding box (square) around the central pin to force the API to filter geographically."""
-    # 1 degree of latitude is ~69 miles
     lat_change = radius_miles / 69.0
-    # 1 degree of longitude varies by latitude
     lon_change = radius_miles / (69.0 * math.cos(math.radians(lat)))
     
     n = lat + lat_change
@@ -121,7 +119,7 @@ def get_bounding_box(lat, lon, radius_miles):
     return s, w, n, e
 
 def extract_api_date(item, possible_keys):
-    """Aggressively hunts for a date inside the deeply nested JSON payload."""
+    """Aggressively hunts for a date inside the JSON payload."""
     for key in possible_keys:
         if item.get(key): return str(item.get(key))
     for nested in["dates", "timestamps", "system", "details", "extended"]:
@@ -142,19 +140,21 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
     # Generate the geographic boundaries
     s, w, n, e = get_bounding_box(lat, lng, radius)
     
-    # Create a closed polygon: NW -> NE -> SE -> SW -> NW
-    polygon_str = f"{n},{w}|{n},{e}|{s},{e}|{s},{w}|{n},{w}"
-    
-    # CRITICAL FIX: Removed conflicting spatial bounds to fix the 400 Bad Request Error! 
-    # ONLY using `polygon` to force the API to look exclusively at the San Francisco pin.
+    # CRITICAL FIX: Removed the complex "polygon" string that caused the 400 Bad Request error.
+    # We now pass ALL common numeric spatial boundaries to force the API to listen.
     params = {
         "market": market,
         "status": status,
         "limit": limit_size,
-        "pageSize": limit_size,
         "details": "true",
         "extended": "true",
-        "polygon": polygon_str 
+        "lat": lat,
+        "lon": lng,
+        "radius": radius,     # Pure number, no "mi" string
+        "swLat": s,           # Bounding box corners as pure numbers
+        "swLon": w,
+        "neLat": n,
+        "neLon": e
     }
     
     if listing_type != "All":
@@ -198,8 +198,8 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
                     if agent_filter.lower() not in agent_full_name.lower():
                         continue 
 
-                # 4. BULLETPROOF DATE FILTERING (Aggressively hunts for deeply nested dates)
-                list_date_str = extract_api_date(item,["listDate", "listingDate", "onMarketDate", "entryDate"])
+                # 4. BULLETPROOF DATE FILTERING
+                list_date_str = extract_api_date(item, ["listDate", "listingDate", "onMarketDate", "entryDate"])
                 close_date_str = extract_api_date(item,["closeDate", "closedDate", "soldDate", "offMarketDate"])
                 
                 if apply_date:
@@ -245,7 +245,7 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
                     item_lat_f = float(item_lat)
                     item_lng_f = float(item_lng)
                     
-                    # 8. THE SAVIOR FUNCTION: Checks the API's math to ensure it is actually inside the circle
+                    # 8. THE SAVIOR FUNCTION: Double checks the API's math to ensure it is actually inside the circle
                     dist_miles = haversine_distance(lat, lng, item_lat_f, item_lng_f)
                     if dist_miles > radius:
                         continue 
@@ -271,7 +271,6 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
         return parsed_listings, len(raw_listings)
 
     except Exception as e:
-        # If it crashes, output the exact URL causing the problem so we can inspect it
         st.error(f"Error fetching data from API: {e}")
         return[], 0
 
