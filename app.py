@@ -3,23 +3,18 @@ import folium
 from streamlit_folium import st_folium
 import requests
 import pandas as pd
-import math
-from datetime import datetime, timedelta
+from datetime import datetime
 
 # --- INITIALIZE SESSION STATE ---
-if "clicked_lat" not in st.session_state:
-    st.session_state.clicked_lat = 37.7749
-if "clicked_lng" not in st.session_state:
-    st.session_state.clicked_lng = -122.4194
 if "listings" not in st.session_state:
     st.session_state.listings =[]
 if "raw_api_response" not in st.session_state:
     st.session_state.raw_api_response = {}
 
-st.set_page_config(page_title="SF Real Estate Map", layout="wide")
+st.set_page_config(page_title="MLS Market Dashboard", layout="wide")
 
-st.title("🌉 San Francisco Real Estate Map")
-st.markdown("Drop a pin anywhere in the SF area to search the Slipstream API.")
+st.title("🏡 MLS Market Dashboard")
+st.markdown("Search an entire MLS database for active, coming soon, or closed inventory with advanced filters.")
 
 # --- FETCH API KEY FROM SECRETS ---
 if "SLIPSTREAM_API_KEY" in st.secrets:
@@ -28,107 +23,58 @@ else:
     api_key = None
     st.error("🚨 API Key not found! Please add 'SLIPSTREAM_API_KEY' to your Streamlit Cloud Secrets.")
 
-# --- SIDEBAR: SETTINGS & INPUTS ---
-st.sidebar.header("Search Settings")
-market_id = st.sidebar.text_input("Market ID", value="sfar", help="Your MLS Market ID")
-
-radius_miles = st.sidebar.number_input(
-    "Search Radius (miles)", 
-    min_value=0.01, 
-    max_value=50.0, 
-    value=0.5, 
-    step=0.1,
-    help="Type an exact number or use the arrows."
-)
+# --- SIDEBAR: SEARCH SETTINGS ---
+st.sidebar.header("1. Market Setup")
+market_id = st.sidebar.text_input("Market ID", value="sfar", help="Your MLS Market ID (e.g., 'sfar')")
 
 listing_status = st.sidebar.selectbox(
-    "Listing Status",[
-        "Active", "Active Under Contract", "Canceled", "Closed", "Coming Soon", 
-        "Comp", "Deleted", "Expired", "Hold", "Incomplete", "Off Market", 
-        "Other", "Pending", "Withdrawn"
-    ],
+    "Listing Status",["Coming Soon", "Active", "Active Under Contract", "Pending", "Closed", "Canceled", "Expired", "Hold", "Withdrawn"],
+    index=0 # Defaults to Coming Soon!
+)
+
+listing_type_filter = st.sidebar.selectbox(
+    "Listing Type",["Residential", "Commercial", "Farm", "Land", "Multifamily", "Rental", "All"],
     index=0
 )
 
-# --- API LIMITER ---
-st.sidebar.markdown("---")
-st.sidebar.subheader("API Limits")
+# --- SIDEBAR: PROPERTY FILTERS ---
+st.sidebar.header("2. Property Filters")
+
+col1, col2 = st.sidebar.columns(2)
+with col1:
+    min_price = st.number_input("Min Price", min_value=0, value=0, step=50000)
+with col2:
+    max_price = st.number_input("Max Price", min_value=0, value=10000000, step=50000, help="Set to 0 for no maximum.")
+
+col3, col4 = st.sidebar.columns(2)
+with col3:
+    min_beds = st.number_input("Min Beds", min_value=0.0, value=0.0, step=1.0)
+with col4:
+    min_baths = st.number_input("Min Baths", min_value=0.0, value=0.0, step=0.5)
+
+# --- SIDEBAR: API LIMITS ---
+st.sidebar.header("3. API Limits")
 max_results = st.sidebar.number_input(
     "Max Results per Request",
     min_value=1,
-    max_value=500,
-    value=200,
-    step=25,
-    help="Limits the data payload to protect your API usage quota."
-)
-
-# --- LISTING & PROPERTY FILTERS ---
-st.sidebar.markdown("---")
-st.sidebar.subheader("Additional Filters")
-
-listing_type_filter = st.sidebar.selectbox(
-    "Listing Type (Broad)",["All", "Residential", "Commercial", "Farm", "Land", "Multifamily", "Rental"],
-    index=1, 
-    help="Broad category. Defaults to Residential."
-)
-
-property_type_filter = st.sidebar.selectbox(
-    "Property Type (Specific)",[
-        "All", "Single Family", "Condominium", "Townhouse", "Duplex", 
-        "Triplex", "Quadruplex", "Manufactured Home", "Mobile Home", "Land"
-    ],
-    index=0,
-    help="Specific structure type."
-)
-
-agent_name_filter = st.sidebar.text_input(
-    "Agent Name", 
-    value="", 
-    help="Leave blank for all agents, or type a first or last name to filter."
-)
-
-# --- DATE FILTER ---
-st.sidebar.markdown("---")
-st.sidebar.subheader("Date Filter")
-apply_date_filter = st.sidebar.checkbox("Enable Date Filter", value=False)
-filter_date = st.sidebar.date_input(
-    "On or After Date", 
-    value=datetime.today() - timedelta(days=30),
-    help="Filters Listing Date (if Active) or Closed Date (if Closed)."
+    max_value=1000,
+    value=250,
+    step=50,
+    help="Safeguard your API quota."
 )
 
 # --- HELPER FUNCTIONS ---
-def haversine_distance(lat1, lon1, lat2, lon2):
-    """Calculates the distance in miles between two GPS coordinates."""
-    R = 3958.8 
-    dlat = math.radians(lat2 - lat1)
-    dlon = math.radians(lon2 - lon1)
-    a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
-    return R * c
-
-def get_bounding_box(lat, lon, radius_miles):
-    """Calculates a bounding box (square) around the central pin to force the API to filter geographically."""
-    lat_change = radius_miles / 69.0
-    lon_change = radius_miles / (69.0 * math.cos(math.radians(lat)))
-    
-    n = lat + lat_change
-    s = lat - lat_change
-    e = lon + lon_change
-    w = lon - lon_change
-    return s, w, n, e
-
-def extract_api_date(item, possible_keys):
-    """Aggressively hunts for a date inside the JSON payload."""
+def extract_nested_value(item, possible_keys):
+    """Aggressively hunts for a specific key (like listDate or daysOnMarket) inside a deeply nested JSON payload."""
     for key in possible_keys:
-        if item.get(key): return str(item.get(key))
+        if item.get(key) is not None: return item.get(key)
     for nested in["dates", "timestamps", "system", "details", "extended"]:
         if isinstance(item.get(nested), dict):
             for key in possible_keys:
-                if item[nested].get(key): return str(item[nested].get(key))
-    return ""
+                if item[nested].get(key) is not None: return item[nested].get(key)
+    return None
 
-def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date, since_date, listing_type, prop_type, agent_filter, limit_size):
+def fetch_mls_listings(key, market, status, limit_size, list_type, min_p, max_p, min_bd, min_ba):
     url = "https://slipstream.homejunction.com/ws/listings/search"
     
     headers = {
@@ -137,30 +83,19 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
         "HJI-API-Key": key 
     }
     
-    # Generate the geographic boundaries
-    s, w, n, e = get_bounding_box(lat, lng, radius)
-    
-    # CRITICAL FIX: Removed the complex "polygon" string that caused the 400 Bad Request error.
-    # We now pass ALL common numeric spatial boundaries to force the API to listen.
+    # We pass the market, status, and limit to the API. 
+    # (We will filter beds/baths/price in Python to ensure 100% stability against 400 Bad Request errors)
     params = {
         "market": market,
         "status": status,
         "limit": limit_size,
+        "pageSize": limit_size,
         "details": "true",
-        "extended": "true",
-        "lat": lat,
-        "lon": lng,
-        "radius": radius,     # Pure number, no "mi" string
-        "swLat": s,           # Bounding box corners as pure numbers
-        "swLon": w,
-        "neLat": n,
-        "neLon": e
+        "extended": "true" 
     }
     
-    if listing_type != "All":
-        params["listingType"] = listing_type
-    if prop_type != "All":
-        params["propertyType"] = prop_type
+    if list_type != "All":
+        params["listingType"] = list_type
     
     try:
         response = requests.get(url, headers=headers, params=params)
@@ -169,7 +104,7 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
         
         st.session_state.raw_api_response = data 
         
-        raw_listings =[]
+        raw_listings = []
         if "result" in data and isinstance(data["result"], dict) and "listings" in data["result"]:
             raw_listings = data["result"]["listings"]
         elif "result" in data and isinstance(data["result"], list):
@@ -179,40 +114,34 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
         
         for item in raw_listings:
             try:
-                # 1. BULLETPROOF LISTING TYPE
-                item_listing_type = str(item.get("listingType") or "Unknown")
-                if listing_type != "All":
-                    if listing_type.lower() not in item_listing_type.lower():
-                        continue
-                        
-                # 2. BULLETPROOF PROPERTY TYPE
-                item_prop_type = str(item.get("propertyType") or "Unknown")
-                if prop_type != "All":
-                    if prop_type.lower() not in item_prop_type.lower():
-                        continue
-                
-                # 3. BULLETPROOF AGENT NAME
-                agent_info = item.get("listAgent") or {}
-                agent_full_name = str(agent_info.get("fullName") or agent_info.get("name") or item.get("agentName") or "Unknown Agent")
-                if agent_filter:
-                    if agent_filter.lower() not in agent_full_name.lower():
-                        continue 
+                # 1. PRICING & PROPERTY SIZING (For our Python Filters)
+                raw_price = item.get("listPrice") if item.get("listPrice") is not None else item.get("price", 0)
+                try: price = float(raw_price) if raw_price else 0.0
+                except (ValueError, TypeError): price = 0.0
 
-                # 4. BULLETPROOF DATE FILTERING
-                list_date_str = extract_api_date(item, ["listDate", "listingDate", "onMarketDate", "entryDate"])
-                close_date_str = extract_api_date(item,["closeDate", "closedDate", "soldDate", "offMarketDate"])
+                beds = float(item.get("beds", item.get("bedrooms", 0)))
+                baths = float(item.get("baths", item.get("bathrooms", 0)))
+
+                # --- APPLY PYTHON FILTERS ---
+                if price < min_p: continue
+                if max_p > 0 and price > max_p: continue
+                if beds < min_bd: continue
+                if baths < min_ba: continue
                 
-                if apply_date:
-                    target_date_str = close_date_str if status == "Closed" else list_date_str
-                    if target_date_str and len(target_date_str) >= 10:
-                        try:
-                            item_date = datetime.strptime(target_date_str[:10], "%Y-%m-%d").date()
-                            if item_date < since_date:
-                                continue 
-                        except Exception:
-                            pass 
+                # 2. LISTING & PROPERTY TYPES
+                item_listing_type = str(item.get("listingType") or "Unknown")
+                item_prop_type = str(item.get("propertyType") or "Unknown")
                 
-                # 5. BULLETPROOF ADDRESS
+                # 3. DATE & DOM FILTERING
+                list_date_str = str(extract_nested_value(item,["listDate", "listingDate", "onMarketDate", "entryDate"]) or "")
+                close_date_str = str(extract_nested_value(item, ["closeDate", "closedDate", "soldDate"]) or "")
+                
+                # Hunt for Days On Market
+                dom = extract_nested_value(item,["daysOnMarket", "dom", "cdom"])
+                try: dom = int(dom) if dom is not None else 0
+                except (ValueError, TypeError): dom = 0
+                
+                # 4. ADDRESS
                 addr_info = item.get("address") or {}
                 if isinstance(addr_info, dict):
                     if addr_info.get("withheld", False) or "deliveryLine" not in addr_info:
@@ -224,48 +153,27 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
                 else:
                     address = str(addr_info)
 
-                # 6. BULLETPROOF PRICING
-                raw_price = item.get("listPrice")
-                if raw_price is None:
-                    raw_price = item.get("price", 0)
-                try:
-                    price = float(raw_price) if raw_price else 0.0
-                except (ValueError, TypeError):
-                    price = 0.0
-
-                beds = item.get("beds", item.get("bedrooms", 0))
-                baths = item.get("baths", item.get("bathrooms", 0))
-                
-                # 7. BULLETPROOF COORDINATES
+                # 5. COORDINATES
                 coords = item.get("coordinates") or {}
                 item_lat = coords.get("latitude", coords.get("lat", item.get("lat")))
                 item_lng = coords.get("longitude", coords.get("lon", item.get("lon", item.get("lng"))))
                 
                 if item_lat and item_lng:
-                    item_lat_f = float(item_lat)
-                    item_lng_f = float(item_lng)
-                    
-                    # 8. THE SAVIOR FUNCTION: Double checks the API's math to ensure it is actually inside the circle
-                    dist_miles = haversine_distance(lat, lng, item_lat_f, item_lng_f)
-                    if dist_miles > radius:
-                        continue 
-                    
                     parsed_listings.append({
                         "address": address,
                         "price": price,
                         "beds": beds,
                         "baths": baths,
+                        "dom": dom,
                         "listing_type": item_listing_type,
                         "property_type": item_prop_type,
-                        "agent": agent_full_name,
-                        "lat": item_lat_f,
-                        "lng": item_lng_f,
+                        "lat": float(item_lat),
+                        "lng": float(item_lng),
                         "status": str(item.get("status", status)),
                         "list_date": list_date_str[:10] if list_date_str else "N/A",
                         "close_date": close_date_str[:10] if close_date_str else "N/A"
                     })
             except Exception as loop_error:
-                print(f"Skipped a row due to parsing error: {loop_error}")
                 continue
                 
         return parsed_listings, len(raw_listings)
@@ -274,92 +182,91 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
         st.error(f"Error fetching data from API: {e}")
         return[], 0
 
-# --- MAP RENDERING ---
-m = folium.Map(location=[st.session_state.clicked_lat, st.session_state.clicked_lng], zoom_start=15)
-
-folium.Marker([st.session_state.clicked_lat, st.session_state.clicked_lng],
-    icon=folium.Icon(color="red", icon="crosshairs", prefix='fa'),
-    tooltip="Search Center"
-).add_to(m)
-
-folium.Circle(
-    radius=radius_miles * 1609.34, 
-    location=[st.session_state.clicked_lat, st.session_state.clicked_lng],
-    color="blue",
-    fill=True,
-    fill_opacity=0.1
-).add_to(m)
-
-for listing in st.session_state.listings:
-    popup_text = f"<b>{listing['address']}</b><br/>${listing['price']:,.0f}<br/>{listing['beds']}B / {listing['baths']}b<br/><i>{listing['listing_type']} - {listing['property_type']}</i>"
-    
-    if listing['status'] == "Closed" and listing['close_date'] != "N/A":
-        popup_text += f"<br/>Closed: {listing['close_date']}"
-    elif listing['list_date'] != "N/A":
-        popup_text += f"<br/>Listed: {listing['list_date']}"
-        
-    folium.Marker(
-        [listing["lat"], listing["lng"]],
-        icon=folium.Icon(color="green", icon="home"),
-        tooltip=listing["status"],
-        popup=folium.Popup(popup_text, max_width=250)
-    ).add_to(m)
-
-map_data = st_folium(m, width=800, height=500, returned_objects=["last_clicked"])
-
-# --- HANDLE MAP CLICKS ---
-if map_data and map_data.get("last_clicked"):
-    new_lat = map_data["last_clicked"]["lat"]
-    new_lng = map_data["last_clicked"]["lng"]
-    
-    if new_lat != st.session_state.clicked_lat or new_lng != st.session_state.clicked_lng:
-        st.session_state.clicked_lat = new_lat
-        st.session_state.clicked_lng = new_lng
-        st.session_state.listings =[] 
-        st.rerun()
-
-# --- SEARCH ACTION ---
-st.write(f"**Current SF Search Center:** {st.session_state.clicked_lat:.5f}, {st.session_state.clicked_lng:.5f}")
-
-if st.button("Search Actual API", type="primary"):
+# --- MAIN DASHBOARD AREA ---
+if st.sidebar.button("Search MLS", type="primary", use_container_width=True):
     if not api_key:
         st.error("Cannot search. The API Key is missing from Streamlit Secrets.")
     else:
-        with st.spinner(f"Fetching {listing_status} listings from {market_id.upper()} (Max {max_results})..."):
-            st.session_state.listings, raw_count = fetch_slipstream_listings(
-                st.session_state.clicked_lat,
-                st.session_state.clicked_lng,
-                radius_miles,
+        with st.spinner(f"Querying {market_id.upper()} for {listing_status} properties..."):
+            st.session_state.listings, raw_count = fetch_mls_listings(
                 api_key,
                 market_id,
                 listing_status,
-                apply_date_filter,
-                filter_date,
-                listing_type_filter,      
-                property_type_filter,      
-                agent_name_filter,
-                max_results         
+                max_results,
+                listing_type_filter,
+                min_price,
+                max_price,
+                min_beds,
+                min_baths
             )
             
         if st.session_state.listings:
-            st.success(f"Successfully mapped {len(st.session_state.listings)} properties matching your filters!")
-            st.rerun() 
+            st.success(f"Successfully processed {len(st.session_state.listings)} properties matching your criteria!")
         else:
             if raw_count > 0:
-                st.warning(f"The API returned {raw_count} properties, but NONE of them matched your geographic circle or specific filters. Try increasing your radius or limit!")
+                st.warning(f"The API returned {raw_count} properties, but NONE matched your Price, Beds, or Baths filters.")
             else:
                 st.warning("The API returned 0 results. Check the Debug Expander below.")
 
-# --- RESULTS DATAFRAME ---
+# If we have listings, render the Map and Table views
 if st.session_state.listings:
-    st.write("### Listing Details (Click column headers to sort)")
+    
+    # --- 1. METRICS ROW ---
+    st.markdown("---")
+    avg_price = sum(item["price"] for item in st.session_state.listings) / len(st.session_state.listings)
+    avg_dom = sum(item["dom"] for item in st.session_state.listings) / len(st.session_state.listings)
+    
+    m_col1, m_col2, m_col3 = st.columns(3)
+    m_col1.metric("Total Properties Found", f"{len(st.session_state.listings)}")
+    m_col2.metric("Average List Price", f"${avg_price:,.0f}")
+    m_col3.metric("Average Days on Market", f"{avg_dom:.0f} Days")
+    
+    st.markdown("---")
+
+    # --- 2. MAP VIEW ---
+    st.write("### Geographic Distribution")
+    
+    # Calculate map center dynamically based on the returned properties
+    avg_lat = sum([L["lat"] for L in st.session_state.listings]) / len(st.session_state.listings)
+    avg_lng = sum([L["lng"] for L in st.session_state.listings]) / len(st.session_state.listings)
+    
+    m = folium.Map(location=[avg_lat, avg_lng], zoom_start=11)
+    
+    # Fit the map bounds to perfectly frame all properties
+    sw = [min([L["lat"] for L in st.session_state.listings]), min([L["lng"] for L in st.session_state.listings])]
+    ne = [max([L["lat"] for L in st.session_state.listings]), max([L["lng"] for L in st.session_state.listings])]
+    m.fit_bounds([sw, ne])
+
+    for listing in st.session_state.listings:
+        popup_text = f"""
+        <b>{listing['address']}</b><br/>
+        ${listing['price']:,.0f}<br/>
+        {listing['beds']}B / {listing['baths']}b<br/>
+        <b>DOM:</b> {listing['dom']}<br/>
+        <i>{listing['property_type']}</i>
+        """
+        
+        folium.Marker(
+            [listing["lat"], listing["lng"]],
+            icon=folium.Icon(color="green" if listing_status == "Active" else "blue", icon="home"),
+            tooltip=listing["status"],
+            popup=folium.Popup(popup_text, max_width=250)
+        ).add_to(m)
+
+    st_folium(m, width=1200, height=500, returned_objects=[])
+
+    # --- 3. TABLE VIEW ---
+    st.write("### Detailed Property Data")
     df = pd.DataFrame(st.session_state.listings)
     
+    # Force column types to prevent React UI crashes
     df["price"] = pd.to_numeric(df["price"], errors="coerce").fillna(0).astype(int)
     df["beds"] = pd.to_numeric(df["beds"], errors="coerce").fillna(0).astype(float)
     df["baths"] = pd.to_numeric(df["baths"], errors="coerce").fillna(0).astype(float)
+    df["dom"] = pd.to_numeric(df["dom"], errors="coerce").fillna(0).astype(int)
     
-    df = df[["address", "price", "status", "listing_type", "property_type", "beds", "baths", "agent", "list_date", "close_date"]]
+    # Arrange columns beautifully
+    df = df[["address", "price", "dom", "status", "listing_type", "property_type", "beds", "baths", "list_date", "close_date"]]
     
     st.dataframe(
         df, 
@@ -368,12 +275,12 @@ if st.session_state.listings:
         column_config={
             "address": "Address",
             "price": st.column_config.NumberColumn("Price", format="$%d"),
+            "dom": st.column_config.NumberColumn("DOM"),
             "status": "Status",
             "listing_type": "Listing Type",
             "property_type": "Property Sub-Type",
             "beds": st.column_config.NumberColumn("Beds"),
             "baths": st.column_config.NumberColumn("Baths"),
-            "agent": "Agent Name",
             "list_date": "List Date",
             "close_date": "Close Date"
         }
