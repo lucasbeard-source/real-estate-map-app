@@ -107,18 +107,8 @@ def haversine_distance(lat1, lon1, lat2, lon2):
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
     return R * c
 
-def get_bounding_box(lat, lon, radius_miles):
-    """Calculates a bounding box (square) around the central pin to force the API to filter geographically."""
-    lat_change = radius_miles / 69.0
-    lon_change = radius_miles / (69.0 * math.cos(math.radians(lat)))
-    
-    n = lat + lat_change
-    s = lat - lat_change
-    e = lon + lon_change
-    w = lon - lon_change
-    return s, w, n, e
-
 def extract_api_date(item, possible_keys):
+    """Aggressively hunts for a date inside the JSON payload."""
     for key in possible_keys:
         if item.get(key): return str(item.get(key))
     for nested in["dates", "timestamps", "system", "details", "extended"]:
@@ -136,30 +126,17 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
         "HJI-API-Key": key 
     }
     
-    # Generate the geographic boundaries
-    s, w, n, e = get_bounding_box(lat, lng, radius)
-    polygon_str = f"{n},{w}|{n},{e}|{s},{e}|{s},{w}|{n},{w}"
-    
-    # CRITICAL FIX: We are throwing every common spatial parameter at the API to guarantee it filters locally!
+    # CRITICAL FIX: Removed conflicting spatial bounds to fix the 400 Bad Request Error! 
+    # Only using the proven lat, lon, and string-formatted radius.
     params = {
         "market": market,
-        "status": status,
-        "limit": limit_size,
-        "pageSize": limit_size,
-        "details": "true",
-        "extended": "true",
         "lat": lat,
         "lon": lng,
-        "latitude": lat,
-        "longitude": lng,
         "radius": f"{radius}mi", 
-        "distance": f"{radius}mi",
-        "bounds": f"{s},{w},{n},{e}",
-        "polygon": polygon_str,
-        "swLat": s,
-        "swLon": w,
-        "neLat": n,
-        "neLon": e
+        "status": status,
+        "limit": limit_size,
+        "details": "true",
+        "extended": "true" 
     }
     
     if listing_type != "All":
@@ -250,7 +227,7 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
                     item_lat_f = float(item_lat)
                     item_lng_f = float(item_lng)
                     
-                    # 8. THE SAVIOR FUNCTION: Double checks the API's math to ensure it is actually inside the circle
+                    # 8. THE SAVIOR FUNCTION: Checks the API's work to ensure we are actually inside the circle
                     dist_miles = haversine_distance(lat, lng, item_lat_f, item_lng_f)
                     if dist_miles > radius:
                         continue 
@@ -273,10 +250,10 @@ def fetch_slipstream_listings(lat, lng, radius, key, market, status, apply_date,
                 print(f"Skipped a row due to parsing error: {loop_error}")
                 continue
                 
-        # Return both the parsed listings AND the raw count for better UI warnings
         return parsed_listings, len(raw_listings)
 
     except Exception as e:
+        # If it crashes, output the exact URL causing the problem so we can inspect it
         st.error(f"Error fetching data from API: {e}")
         return[], 0
 
@@ -348,7 +325,7 @@ if st.button("Search Actual API", type="primary"):
             )
             
         if st.session_state.listings:
-            st.success(f"Successfully mapped {len(st.session_state.listings)} properties!")
+            st.success(f"Successfully mapped {len(st.session_state.listings)} properties matching your filters!")
             st.rerun() 
         else:
             if raw_count > 0:
